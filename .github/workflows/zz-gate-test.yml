@@ -1,0 +1,53 @@
+# TEMPORARY. Proves the ops-heartbeat gate semantics: with continue-on-error, one failing step
+# must not stop the others AND must still turn the run red. Branch deleted right after.
+name: zz-gate-test
+on: push
+permissions:
+  contents: read
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call reminders
+        id: reminders
+        continue-on-error: true
+        run: |
+          set -u
+          code=200
+          echo "reminders: HTTP $code"
+          [ "$code" = "200" ]
+      - name: Attendance check
+        id: attendance
+        continue-on-error: true
+        run: |
+          set -u
+          code=503
+          echo "attendance: HTTP $code"
+          [ "$code" = "200" ]
+      - name: Workflow engine tick
+        id: tick
+        continue-on-error: true
+        run: |
+          set -u
+          code=200
+          echo "workflow tick: HTTP $code"
+          [ "$code" = "200" ]
+      - name: Gate
+        if: always()
+        env:
+          R_OUTCOME: ${{ steps.reminders.outcome }}
+          A_OUTCOME: ${{ steps.attendance.outcome }}
+          T_OUTCOME: ${{ steps.tick.outcome }}
+        run: |
+          set -u
+          echo "reminders=$R_OUTCOME attendance=$A_OUTCOME tick=$T_OUTCOME"
+          bad=0
+          for o in "$R_OUTCOME" "$A_OUTCOME" "$T_OUTCOME"; do
+            [ "$o" = "success" ] || bad=1
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "At least one endpoint did not return 200. Read the step logs above."
+            exit 1
+          fi
+          echo "All three endpoints returned 200."
