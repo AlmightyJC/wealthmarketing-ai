@@ -49,6 +49,14 @@
 # ~/.wealth-reminders.env, so a rotated key has to be written in both places or the two clocks
 # disagree.
 #
+# BEFORE YOU ROTATE THE PLATFORM'S CRON_SECRET, read this. The platform also signs every email
+# unsubscribe link with CRON_SECRET, unless UNSUBSCRIBE_SECRET is set in the Vercel environment
+# (wealth-platform/lib/emailCompliance.ts). Unsubscribe links are permanent: a message opened six
+# months from now must still be able to opt its reader out. So rotating CRON_SECRET while
+# UNSUBSCRIBE_SECRET is unset silently breaks the opt-out link in every email already delivered,
+# which is a CAN-SPAM failure rather than an inconvenience. Set UNSUBSCRIBE_SECRET once, before the
+# first bulk send, and this key becomes safe to rotate.
+#
 # HOUSEKEEPING
 # The repo is public, so Actions minutes are free and unmetered. GitHub does disable scheduled
 # workflows in a public repo after 60 days with no commits; if the heartbeat goes quiet, check the
