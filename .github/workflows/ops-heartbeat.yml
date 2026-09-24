@@ -30,21 +30,29 @@
 #                      that makes a drip step written as "20 minutes later" actually fire 20 minutes
 #                      later instead of at the next daily Vercel cron.
 #
+# WHY EACH STEP IS continue-on-error, AND WHY THERE IS STILL A GATE AT THE END
+# Each endpoint runs in its own step with continue-on-error, so one endpoint being down can never
+# stop the other two from being poked. On its own that would make every run green even when all
+# three endpoints were failing, which is worse than no monitoring at all. So the last step reads
+# the three outcomes and fails the job if any of them did not return 200. Steps stay independent,
+# the run still turns red.
+#
 # SECRETS
 # All three URLs carry their auth key in the query string, so each full URL is stored as a GitHub
 # Actions secret and never appears in a log line. Every step prints only the HTTP status code,
-# stderr from curl is discarded, and no step echoes the URL. Set or rotate them with:
-#   gh secret set WM_REMINDER_URL --repo AlmightyJC/wealthmarketing-ai
-#   gh secret set WM_ATTENDANCE_URL --repo AlmightyJC/wealthmarketing-ai
-#   gh secret set WM_WORKFLOW_TICK_URL --repo AlmightyJC/wealthmarketing-ai
+# stderr from curl is discarded, and no step echoes the URL. Set or rotate them by PIPING the
+# value in, and note the gotcha on the second line:
+#   printf '%s' "$THE_URL" | gh secret set WM_REMINDER_URL --repo AlmightyJC/wealthmarketing-ai
+#   # do NOT write `--body -` expecting stdin: gh stores the literal string "-" and every poke
+#   # then returns HTTP 000 while the run still looks green.
+# The other two are WM_ATTENDANCE_URL and WM_WORKFLOW_TICK_URL. The same values live on the Mac in
+# ~/.wealth-reminders.env, so a rotated key has to be written in both places or the two clocks
+# disagree.
 #
 # HOUSEKEEPING
 # The repo is public, so Actions minutes are free and unmetered. GitHub does disable scheduled
 # workflows in a public repo after 60 days with no commits; if the heartbeat goes quiet, check the
 # Actions tab for the "this workflow was disabled" banner and re-enable it.
-#
-# Each endpoint runs in its own step with continue-on-error, so one endpoint being down can never
-# hide the result of the other two.
 
 name: ops-heartbeat
 
@@ -63,43 +71,65 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Call reminders
+        id: reminders
         continue-on-error: true
         env:
           URL: ${{ secrets.WM_REMINDER_URL }}
         run: |
           set -u
           if [ -z "${URL:-}" ]; then
-            echo "reminders -> SKIPPED (secret WM_REMINDER_URL is not set)"
+            echo "reminders: SKIPPED, secret WM_REMINDER_URL is not set"
             exit 1
           fi
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
-          echo "reminders -> HTTP $code"
+          echo "reminders: HTTP $code"
           [ "$code" = "200" ]
 
       - name: Attendance check
+        id: attendance
         continue-on-error: true
         env:
           URL: ${{ secrets.WM_ATTENDANCE_URL }}
         run: |
           set -u
           if [ -z "${URL:-}" ]; then
-            echo "attendance -> SKIPPED (secret WM_ATTENDANCE_URL is not set)"
+            echo "attendance: SKIPPED, secret WM_ATTENDANCE_URL is not set"
             exit 1
           fi
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
-          echo "attendance -> HTTP $code"
+          echo "attendance: HTTP $code"
           [ "$code" = "200" ]
 
       - name: Workflow engine tick
+        id: tick
         continue-on-error: true
         env:
           URL: ${{ secrets.WM_WORKFLOW_TICK_URL }}
         run: |
           set -u
           if [ -z "${URL:-}" ]; then
-            echo "workflow-tick -> SKIPPED (secret WM_WORKFLOW_TICK_URL is not set)"
+            echo "workflow tick: SKIPPED, secret WM_WORKFLOW_TICK_URL is not set"
             exit 1
           fi
           code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
-          echo "workflow-tick -> HTTP $code"
+          echo "workflow tick: HTTP $code"
           [ "$code" = "200" ]
+
+      - name: Gate
+        if: always()
+        env:
+          R_OUTCOME: ${{ steps.reminders.outcome }}
+          A_OUTCOME: ${{ steps.attendance.outcome }}
+          T_OUTCOME: ${{ steps.tick.outcome }}
+        run: |
+          set -u
+          echo "reminders=$R_OUTCOME attendance=$A_OUTCOME tick=$T_OUTCOME"
+          bad=0
+          for o in "$R_OUTCOME" "$A_OUTCOME" "$T_OUTCOME"; do
+            [ "$o" = "success" ] || bad=1
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "At least one endpoint did not return 200. Read the step logs above."
+            exit 1
+          fi
+          echo "All three endpoints returned 200."
