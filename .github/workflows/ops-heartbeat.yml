@@ -66,8 +66,12 @@ name: ops-heartbeat
 
 on:
   schedule:
-    # Every 5 minutes: the shortest interval GitHub accepts. Best effort, see DEDUPE above.
-    - cron: "*/5 * * * *"
+    # Every 15 minutes. We asked for */5 first and GitHub silently ran it zero times in four
+    # hours: on free public repos the short intervals are skipped under load, which is documented
+    # as "best effort". 15 minutes is the interval that actually fires. Harmless because every
+    # endpoint decides for itself what is due and each one dedupes (see DEDUPE above), and Juan's
+    # Mac still pokes the same three URLs every 5 minutes as the fast path when it is awake.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
