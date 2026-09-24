@@ -1,0 +1,105 @@
+# Ops heartbeat: the clock for the Wealth Marketing AI engine.
+#
+# WHY THIS EXISTS
+# Vercel is on the Hobby plan, and Hobby refuses sub-daily crons ("Hobby accounts are limited to
+# daily cron jobs"), so vercel.json can only carry one daily cron. A 5 minute launchd job on Juan's
+# Mac (com.wealthmarketing.callreminders) poked the same endpoints, but it dies whenever the Mac
+# sleeps. This workflow is the same 5 minute poke running in GitHub's cloud, so the engine keeps
+# time with the laptop shut.
+#
+# WHICH ONE IS AUTHORITATIVE
+# This cloud heartbeat is the PRIMARY clock. The Mac launchd job stays on as a fast path: it fires
+# on an exact 300 second interval while the Mac is awake, where GitHub's scheduler can run late.
+# Both pokes are safe to run together, and neither can double-send. See DEDUPE below.
+#
+# DEDUPE, which is what makes a loose schedule fine
+# GitHub's shortest cron interval is 5 minutes, and scheduled runs are best effort: under load they
+# are delayed, and on a quiet public repo they can be skipped entirely. That is acceptable here
+# because nothing downstream is edge triggered. The reminder endpoint decides what is due and then
+# writes a flag on the calendar event, and the workflow engine records each step it has sent, so a
+# poke that arrives twice, or ten minutes late, sends nothing extra. A late poke delays a message,
+# it never duplicates one.
+#
+# THE THREE ENDPOINTS
+#   1. reminders     - asks the /booking backend which call reminders are due (24h, 8h, 1h and
+#                      5 min before the call) and sends the ones that are, flagging each event.
+#   2. attendance    - same backend, one path over. After a call has finished it asks Juan on his
+#                      phone whether the person actually showed up, and flags the event so it only
+#                      ever asks once.
+#   3. workflow-tick - the platform's workflow engine on app.wealthmarketing.ai. This is the tick
+#                      that makes a drip step written as "20 minutes later" actually fire 20 minutes
+#                      later instead of at the next daily Vercel cron.
+#
+# SECRETS
+# All three URLs carry their auth key in the query string, so each full URL is stored as a GitHub
+# Actions secret and never appears in a log line. Every step prints only the HTTP status code,
+# stderr from curl is discarded, and no step echoes the URL. Set or rotate them with:
+#   gh secret set WM_REMINDER_URL --repo AlmightyJC/wealthmarketing-ai
+#   gh secret set WM_ATTENDANCE_URL --repo AlmightyJC/wealthmarketing-ai
+#   gh secret set WM_WORKFLOW_TICK_URL --repo AlmightyJC/wealthmarketing-ai
+#
+# HOUSEKEEPING
+# The repo is public, so Actions minutes are free and unmetered. GitHub does disable scheduled
+# workflows in a public repo after 60 days with no commits; if the heartbeat goes quiet, check the
+# Actions tab for the "this workflow was disabled" banner and re-enable it.
+#
+# Each endpoint runs in its own step with continue-on-error, so one endpoint being down can never
+# hide the result of the other two.
+
+name: ops-heartbeat
+
+on:
+  schedule:
+    # Every 5 minutes: the shortest interval GitHub accepts. Best effort, see DEDUPE above.
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  poke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Call reminders
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.WM_REMINDER_URL }}
+        run: |
+          set -u
+          if [ -z "${URL:-}" ]; then
+            echo "reminders -> SKIPPED (secret WM_REMINDER_URL is not set)"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
+          echo "reminders -> HTTP $code"
+          [ "$code" = "200" ]
+
+      - name: Attendance check
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.WM_ATTENDANCE_URL }}
+        run: |
+          set -u
+          if [ -z "${URL:-}" ]; then
+            echo "attendance -> SKIPPED (secret WM_ATTENDANCE_URL is not set)"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
+          echo "attendance -> HTTP $code"
+          [ "$code" = "200" ]
+
+      - name: Workflow engine tick
+        continue-on-error: true
+        env:
+          URL: ${{ secrets.WM_WORKFLOW_TICK_URL }}
+        run: |
+          set -u
+          if [ -z "${URL:-}" ]; then
+            echo "workflow-tick -> SKIPPED (secret WM_WORKFLOW_TICK_URL is not set)"
+            exit 1
+          fi
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL" 2>/dev/null || echo "000")
+          echo "workflow-tick -> HTTP $code"
+          [ "$code" = "200" ]
